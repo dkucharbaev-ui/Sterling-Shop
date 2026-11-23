@@ -94,6 +94,10 @@ async def show_catalog_cb(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     async with async_session() as db:
         products = await get_products_by_category(db, "vpn")
+        if not products:
+            from bot.bot.db import init_db
+            await init_db()
+            products = await get_products_by_category(db, "vpn")
     rows = []
     for p in products:
         price = calc_product_price(p, p.default_quantity)
@@ -119,6 +123,10 @@ async def cmd_catalog(message: types.Message, state: FSMContext):
     await state.clear()
     async with async_session() as db:
         products = await get_products_by_category(db, "vpn")
+        if not products:
+            from bot.bot.db import init_db
+            await init_db()
+            products = await get_products_by_category(db, "vpn")
     rows = []
     for p in products:
         price = calc_product_price(p, p.default_quantity)
@@ -364,11 +372,12 @@ async def process_valid_recipient(clean_username: str, target_message, state: FS
     pname = data.get("product_name", "Товар")
     qty = data.get("quantity", 1)
     price = Decimal(data.get("price", "165.00"))
+    pid = data.get("product_id", "")
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 CryptoBot (криптовалюта)", callback_data="pay:CRYPTOBOT")],
-            [InlineKeyboardButton(text="💳 Lava Pay (карта РФ / СБП)", callback_data="pay:LAVAPAY")],
+            [InlineKeyboardButton(text="🤖 CryptoBot (криптовалюта)", callback_data=f"pay:CRYPTOBOT:{pid}")],
+            [InlineKeyboardButton(text="💳 Lava Pay (карта РФ / СБП)", callback_data=f"pay:LAVAPAY:{pid}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
         ]
     )
@@ -393,17 +402,21 @@ async def process_valid_recipient(clean_username: str, target_message, state: FS
 # ── Выбор способа оплаты → Экран подтверждения ──
 @router.callback_query(F.data.startswith("pay:"))
 async def select_payment_method(cb: types.CallbackQuery, state: FSMContext):
-    provider_str = cb.data.split(":")[1]
+    parts = cb.data.split(":")
+    provider_str = parts[1]
+    pid = parts[2] if len(parts) > 2 else ""
     provider_label = "CryptoBot (криптовалюта)" if provider_str == "CRYPTOBOT" else "Lava Pay (карты РФ / СБП)"
     data = await state.get_data()
+    if not pid:
+        pid = data.get("product_id", "")
     pname = data.get("product_name", "Товар")
     qty = data.get("quantity", 1)
     price = Decimal(data.get("price", "165.00"))
-    recipient = data.get("recipient", "друг")
+    recipient = data.get("recipient", cb.from_user.username or "друг")
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Оформить и оплатить", callback_data=f"confirm:{provider_str}")],
+            [InlineKeyboardButton(text="✅ Оформить и оплатить", callback_data=f"confirm:{provider_str}:{pid}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
         ]
     )
@@ -425,14 +438,28 @@ async def select_payment_method(cb: types.CallbackQuery, state: FSMContext):
 # ── Создание заказа и инвойса ──
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_order(cb: types.CallbackQuery, state: FSMContext):
-    provider_str = cb.data.split(":")[1]
+    parts = cb.data.split(":")
+    provider_str = parts[1]
+    pid = parts[2] if len(parts) > 2 else None
     provider = PaymentProviderType(provider_str)
     provider_label = "CryptoBot" if provider == PaymentProviderType.CRYPTOBOT else "Lava Pay"
     data = await state.get_data()
-    price = Decimal(data.get("price", "165.00"))
-    qty = int(data.get("quantity", 100))
-    recipient = data.get("recipient", cb.from_user.username or "user")
-    pid = data.get("product_id")
+    if not pid:
+        pid = data.get("product_id")
+
+    if not pid:
+        from bot.bot.main import main_menu_kb
+        await cb.message.edit_text(
+            "⚠️ <b>Сессия заказа истекла</b> (возможно, бот был перезапущен).\n\n"
+            "Пожалуйста, выберите тариф заново 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛡 Выбрать тариф VPN", callback_data="catalog")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
+            ]),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
 
     await cb.message.edit_text("⏳ Формируем заказ и платёжную ссылку...")
 
@@ -441,7 +468,19 @@ async def confirm_order(cb: types.CallbackQuery, state: FSMContext):
             user = await get_or_create_user(db, cb.from_user)
             product = await get_product_by_id(db, pid)
             if not product:
-                raise ValueError("Товар не найден в базе данных")
+                from bot.bot.db import init_db
+                await init_db()
+                product = await get_product_by_id(db, pid)
+            if not product:
+                raise ValueError("Товар не найден. Пожалуйста, откройте каталог заново.")
+
+            recipient = data.get("recipient") or (cb.from_user.username or "user")
+            if "price" in data:
+                price = Decimal(str(data["price"]))
+            else:
+                price = calc_product_price(product, product.default_quantity)
+
+            qty = int(data.get("quantity", product.default_quantity or 1))
 
             from sqlalchemy import func, select as sa_select
             last_num = (await db.execute(sa_select(func.coalesce(func.max(Order.order_number), 100000)))).scalar_one()
