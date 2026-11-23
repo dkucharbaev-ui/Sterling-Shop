@@ -102,7 +102,7 @@ async def show_catalog_cb(cb: types.CallbackQuery, state: FSMContext):
     for p in products:
         price = calc_product_price(p, p.default_quantity)
         label = f"🛡 {p.name} — {price}₽"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.id}")])
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.sku}")])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await cb.message.edit_text(
@@ -131,7 +131,7 @@ async def cmd_catalog(message: types.Message, state: FSMContext):
     for p in products:
         price = calc_product_price(p, p.default_quantity)
         label = f"🛡 {p.name} — {price}₽"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.id}")])
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.sku}")])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(
@@ -163,7 +163,7 @@ async def select_category(cb: types.CallbackQuery, state: FSMContext):
             else:
                 price = calc_product_price(p, p.default_quantity)
                 label = f"{p.name} — {price}₽"
-            rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.id}")])
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"prod:{p.sku}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад в каталог", callback_data="catalog")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await cb.message.edit_text(
@@ -181,15 +181,24 @@ async def select_product(cb: types.CallbackQuery, state: FSMContext):
     async with async_session() as db:
         product = await get_product_by_id(db, pid)
         if not product:
-            await cb.answer("Товар не найден", show_alert=True)
+            from bot.bot.db import init_db
+            await init_db()
+            product = await get_product_by_id(db, pid)
+
+        if not product:
+            await cb.answer("Каталог обновлён. Выберите тариф:", show_alert=False)
+            await show_catalog_cb(cb, state)
             return
+
         pname = product.name
         ptype = product.product_type
         min_q = product.min_quantity or 50
         max_q = product.max_quantity or 100000
+        actual_id = str(product.id)
 
     await state.update_data(
-        product_id=pid,
+        product_id=actual_id,
+        product_sku=product.sku,
         product_name=pname,
         product_type=ptype,
         min_q=min_q,

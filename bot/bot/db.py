@@ -144,19 +144,44 @@ async def get_products_by_category(db: AsyncSession, slug: str):
 async def get_product_by_id(db: AsyncSession, product_id: str | uuid.UUID | None) -> Product | None:
     if not product_id:
         return None
+
+    str_id = str(product_id).strip()
+
+    # 1. Поиск по SKU (например 'vpn-1m', 'stars-custom')
+    result = await db.execute(
+        select(Product).options(selectinload(Product.category))
+        .where(Product.sku == str_id)
+    )
+    prod = result.scalar_one_or_none()
+    if prod:
+        return prod
+
+    # 2. Поиск по UUID
     try:
         if isinstance(product_id, uuid.UUID):
             pid = product_id
         else:
-            pid = uuid.UUID(str(product_id))
+            pid = uuid.UUID(str_id)
+        result = await db.execute(
+            select(Product).options(selectinload(Product.category))
+            .where(Product.id == pid)
+        )
+        prod = result.scalar_one_or_none()
+        if prod:
+            return prod
     except (ValueError, TypeError, AttributeError):
-        return None
+        pass
 
-    result = await db.execute(
-        select(Product).options(selectinload(Product.category))
-        .where(Product.id == pid)
-    )
-    return result.scalar_one_or_none()
+    # 3. Fallback: если пришёл старый ID до пересидирования базы, пытаемся найти любой активный VPN-товар
+    if "vpn" in str_id.lower():
+        result = await db.execute(
+            select(Product).options(selectinload(Product.category))
+            .where(Product.product_type == "VPN_SUBSCRIPTION", Product.is_active.is_(True))
+            .order_by(Product.sort_order)
+        )
+        return result.scalars().first()
+
+    return None
 
 
 async def get_user_orders(db: AsyncSession, user_id: int):
