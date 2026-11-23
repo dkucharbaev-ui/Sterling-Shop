@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: psycho_stars_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN:-localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - frontend_dist:/srv/frontend/dist:ro
+    depends_on:
+      - backend
+      - frontend-builder
+    networks:
+      - psycho_network
+
+  frontend-builder:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: psycho_stars_frontend_builder
+    volumes:
+      - frontend_dist:/app/dist
+    networks:
+      - psycho_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: psycho_stars_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - psycho_network
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: psycho_stars_worker
+    restart: unless-stopped
+    command: arq app.workers.worker.WorkerSettings
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - psycho_network
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: psycho_stars_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    networks:
+      - psycho_network
+
+  db:
+    image: postgres:16-alpine
+    container_name: psycho_stars_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-psychouser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-psychopassword}
+      POSTGRES_DB: ${POSTGRES_DB:-psychostars}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-psychouser} -d ${POSTGRES_DB:-psychostars}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - psycho_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: psycho_stars_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - psycho_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+  frontend_dist:
+
+networks:
+  psycho_network:
+    driver: bridge
